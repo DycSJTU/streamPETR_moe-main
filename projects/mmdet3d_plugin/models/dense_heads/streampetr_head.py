@@ -582,20 +582,64 @@ class StreamPETRHead(AnchorFreeHead):
         # zero init the memory bank
         self.pre_update_memory(data)
 
-        x = data['img_feats']
-        B, N, C, H, W = x.shape
-        num_tokens = N * H * W
-        memory = x.permute(0, 1, 3, 4, 2).reshape(B, num_tokens, C)
-        memory = topk_gather(memory, topk_indexes)
+        # x = data['img_feats']
+        # B, N, C, H, W = x.shape
+        # num_tokens = N * H * W
+        # memory = x.permute(0, 1, 3, 4, 2).reshape(B, num_tokens, C)
+        # memory = topk_gather(memory, topk_indexes)# <--- 单层才会用到这个topk筛选
+        # 这里直接用了传入的 memory_center (是固定分辨率的)
+        # pos_embed, cone = self.position_embeding(data, memory_center, topk_indexes, img_metas)
 
-        pos_embed, cone = self.position_embeding(data, memory_center, topk_indexes, img_metas)
+        # memory = self.memory_embed(memory)
 
-        memory = self.memory_embed(memory)
+        # # spatial_alignment in focal petr
+        # memory = self.spatial_alignment(memory, cone)
+        # pos_embed = self.featurized_pe(pos_embed, memory)
 
-        # spatial_alignment in focal petr
-        memory = self.spatial_alignment(memory, cone)
-        pos_embed = self.featurized_pe(pos_embed, memory)
+        # 1. 拿到特征，转成 list
+        mlvl_feats = data['img_feats']
+        if torch.is_tensor(mlvl_feats):
+            mlvl_feats = [mlvl_feats]
 
+        mlvl_memories = []
+        mlvl_pos_embeds = []
+
+        # 2. 循环处理每一层 (Stride 8/16/32/64)
+        for lvl, x in enumerate(mlvl_feats):
+            B, N, C, H, W = x.shape
+            num_tokens = N * H * W
+
+            # --- A. 处理特征 Memory ---
+            memory = x.permute(0, 1, 3, 4, 2).reshape(B, num_tokens, C)
+            
+            memory = self.memory_embed(memory)
+
+            # --- B. 动态生成当前层级的 Grid (替代 memory_center) ---
+            # 因为每层 H,W 不一样，必须现场算
+            y_range = torch.arange(H, dtype=torch.float32, device=x.device)
+            x_range = torch.arange(W, dtype=torch.float32, device=x.device)
+            y_grid, x_grid = torch.meshgrid(y_range, x_range) 
+
+            # 归一化坐标 (0~1)
+            current_center = torch.stack([x_grid, y_grid], dim=-1) # [H, W, 2]
+            current_center = (current_center + 0.5)
+            current_center[..., 0] = current_center[..., 0] / W
+            current_center[..., 1] = current_center[..., 1] / H
+            
+            # 扩展维度适配接口: [B, N, H, W, 2]
+            current_center = current_center.unsqueeze(0).unsqueeze(0).repeat(B, N, 1, 1, 1)
+
+            # --- C. 生成 3D PE ---
+            # 注意：topk_indexes 传 None，表示为全图生成 PE
+            pos_embed, cone = self.position_embeding(data, current_center, None, img_metas)
+
+            # --- D. 特征对齐 ---
+            memory = self.spatial_alignment(memory, cone)
+            pos_embed = self.featurized_pe(pos_embed, memory)
+
+            # --- E. 存入列表 ---
+            mlvl_memories.append(memory)
+            mlvl_pos_embeds.append(pos_embed)
         reference_points = self.reference_points.weight
         reference_points, attn_mask, mask_dict = self.prepare_for_dn(B, reference_points, img_metas)
         query_pos = self.query_embedding(pos2posemb3d(reference_points))
@@ -605,8 +649,17 @@ class StreamPETRHead(AnchorFreeHead):
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = self.temporal_alignment(query_pos, tgt, reference_points)
 
         # transformer here is a little different from PETR
-        outs_dec, _ = self.transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
-
+        #outs_dec, _ = self.transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
+        # 传入刚刚准备好的列表 (mlvl_memories, mlvl_pos_embeds)
+        outs_dec, _ = self.transformer(
+            mlvl_memories,    # <--- 改成 List
+            tgt, 
+            query_pos, 
+            mlvl_pos_embeds,  # <--- 改成 List
+            attn_mask, 
+            temp_memory, 
+            temp_pos
+        )
         outs_dec = torch.nan_to_num(outs_dec)
         outputs_classes = []
         outputs_coords = []

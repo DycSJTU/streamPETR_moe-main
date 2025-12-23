@@ -63,6 +63,7 @@ class StreamPETRHead(AnchorFreeHead):
                  num_classes,
                  in_channels=256,
                  stride=16,
+                 num_levels = 4,
                  embed_dims=256,
                  num_query=100,
                  num_reg_fcs=2,
@@ -188,6 +189,7 @@ class StreamPETRHead(AnchorFreeHead):
                                        dict(type='ReLU', inplace=True))
         self.num_pred = 6
         self.normedlinear = normedlinear
+        self.num_levels = num_levels
         super(StreamPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
 
         self.loss_cls = build_loss(loss_cls)

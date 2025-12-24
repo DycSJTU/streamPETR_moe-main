@@ -570,7 +570,7 @@ class StreamPETRHead(AnchorFreeHead):
         Args:
             mlvl_feats (tuple[Tensor]): Features from the upstream
                 network, each is a 5D-tensor with shape
-                (B, N, C, H, W).
+                (B, N, C, H, W). B Batch size  N 摄像头数量  C 维度 H 高  W 宽
         Returns:
             all_cls_scores (Tensor): Outputs from the classification head, \
                 shape [nb_dec, bs, num_query, cls_out_channels]. Note \
@@ -583,7 +583,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.pre_update_memory(data)
 
         # x = data['img_feats']
-        # B, N, C, H, W = x.shape
+        # B, N, C, H, W = x.shape  
         # num_tokens = N * H * W
         # memory = x.permute(0, 1, 3, 4, 2).reshape(B, num_tokens, C)
         # memory = topk_gather(memory, topk_indexes)# <--- 单层才会用到这个topk筛选

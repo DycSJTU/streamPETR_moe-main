@@ -456,95 +456,73 @@ class PETRTemporalTransformer(BaseModule):
         self._is_init = True
 
 
-    def forward(self, memory, tgt, query_pos, pos_embed, attn_masks, temp_memory=None, temp_pos=None, mask=None, reg_branch=None):
+    def forward(self, mlvl_memories, tgt, query_pos, mlvl_pos_embeds, attn_masks, temp_memory=None, temp_pos=None, mask=None, reg_branch=None, routing_weights=None):
         """Forward function for `Transformer`.
         Args:
-            x (Tensor): Input query with shape [bs, c, h, w] where
-                c = embed_dims.
-            mask (Tensor): The key_padding_mask used for encoder and decoder,
-                with shape [bs, h, w].
-            query_embed (Tensor): The query embedding for decoder, with shape
-                [num_query, c].
-            pos_embed (Tensor): The positional encoding for encoder and
-                decoder, with the same shape as `x`.
-        Returns:
-            tuple[Tensor]: results of decoder containing the following tensor.
-                - out_dec: Output from decoder. If return_intermediate_dec \
-                      is True output has shape [num_dec_layers, bs,
-                      num_query, embed_dims], else has shape [1, bs, \
-                      num_query, embed_dims].
-                - memory: Output results from encoder, with shape \
-                      [bs, embed_dims, h, w].
+            mlvl_memories (List[Tensor]): List of input features, each [bs, c, h, w]
+            mlvl_pos_embeds (List[Tensor]): List of pos embeds, each [bs, c, h, w]
+            routing_weights (Tensor): [B, Nq, Num_Levels]
         """
-        memory = memory.transpose(0, 1).contiguous()
-        query_pos = query_pos.transpose(0, 1).contiguous()
-        pos_embed = pos_embed.transpose(0, 1).contiguous()
+        # 1. 预处理 Multi-scale Memories
+        feat_flatten = []
+        pos_flatten = []
         
-        n, bs, c = memory.shape
+        # 确保输入是列表
+        if not isinstance(mlvl_memories, list):
+            mlvl_memories = [mlvl_memories]
+            mlvl_pos_embeds = [mlvl_pos_embeds]
 
+        bs = mlvl_memories[0].size(0)
+        c = mlvl_memories[0].size(1)
+
+        for feat, pos in zip(mlvl_memories, mlvl_pos_embeds):
+            # feat: [B, Len, C] -> transpose -> [Len, B, C]
+            feat = feat.transpose(0, 1).contiguous() 
+            pos = pos.transpose(0, 1).contiguous()   
+            
+            feat_flatten.append(feat)
+            pos_flatten.append(pos)
+
+        # 2. 处理 Query 和 Target
+        query_pos = query_pos.transpose(0, 1).contiguous() 
+        
         if tgt is None:
             tgt = torch.zeros_like(query_pos)
         else:
             tgt = tgt.transpose(0, 1).contiguous()
 
+        # 3. 处理 Temporal Memory
         if temp_memory is not None:
             temp_memory = temp_memory.transpose(0, 1).contiguous()
             temp_pos =  temp_pos.transpose(0, 1).contiguous()
 
-        # out_dec: [num_layers, num_query, bs, dim]
+        # 4. 调用 Decoder (传入 List 和 权重)
         out_dec = self.decoder(
             query=tgt,
-            key=memory,
-            value=memory,
-            key_pos=pos_embed,
+            key=feat_flatten,       # List
+            value=feat_flatten,     # List
+            key_pos=pos_flatten,    # List
             query_pos=query_pos,
             temp_memory=temp_memory,
             temp_pos=temp_pos,
             key_padding_mask=mask,
             attn_masks=[attn_masks, None],
             reg_branch=reg_branch,
+            routing_weights=routing_weights # <--- 传权重
             )
+            
         out_dec = out_dec.transpose(1, 2).contiguous()
-        memory = memory.reshape(-1, bs, c).transpose(0, 1).contiguous()
-        return  out_dec, memory
+        
+        # 为了兼容后续代码，返回第一层的 feature 作为 memory
+        memory = feat_flatten[0].transpose(0, 1).contiguous() 
+        
+        return out_dec, memory
 
 
 @TRANSFORMER_LAYER.register_module()
+@TRANSFORMER_LAYER.register_module()
 class PETRTemporalDecoderLayer(BaseModule):
-    """Base `TransformerLayer` for vision transformer.
-
-    It can be built from `mmcv.ConfigDict` and support more flexible
-    customization, for example, using any number of `FFN or LN ` and
-    use different kinds of `attention` by specifying a list of `ConfigDict`
-    named `attn_cfgs`. It is worth mentioning that it supports `prenorm`
-    when you specifying `norm` as the first element of `operation_order`.
-    More details about the `prenorm`: `On Layer Normalization in the
-    Transformer Architecture <https://arxiv.org/abs/2002.04745>`_ .
-
-    Args:
-        attn_cfgs (list[`mmcv.ConfigDict`] | obj:`mmcv.ConfigDict` | None )):
-            Configs for `self_attention` or `cross_attention` modules,
-            The order of the configs in the list should be consistent with
-            corresponding attentions in operation_order.
-            If it is a dict, all of the attention modules in operation_order
-            will be built with this config. Default: None.
-        ffn_cfgs (list[`mmcv.ConfigDict`] | obj:`mmcv.ConfigDict` | None )):
-            Configs for FFN, The order of the configs in the list should be
-            consistent with corresponding ffn in operation_order.
-            If it is a dict, all of the attention modules in operation_order
-            will be built with this config.
-        operation_order (tuple[str]): The execution order of operation
-            in transformer. Such as ('self_attn', 'norm', 'ffn', 'norm').
-            Support `prenorm` when you specifying first element as `norm`.
-            Default：None.
-        norm_cfg (dict): Config dict for normalization layer.
-            Default: dict(type='LN').
-        init_cfg (obj:`mmcv.ConfigDict`): The Config for initialization.
-            Default: None.
-        batch_first (bool): Key, Query and Value are shape
-            of (batch, n, embed_dim)
-            or (n, batch, embed_dim). Default to False.
-    """
+    """Base `TransformerLayer` for vision transformer."""
 
     def __init__(self,
                  attn_cfgs=None,
@@ -611,8 +589,6 @@ class PETRTemporalDecoderLayer(BaseModule):
                 else:
                     attn_cfgs[index]['batch_first'] = self.batch_first
                 attention = build_attention(attn_cfgs[index])
-                # Some custom attentions used as `self_attn`
-                # or `cross_attn` can have different behavior.
                 attention.operation_name = operation_name
                 self.attentions.append(attention)
                 index += 1
@@ -653,37 +629,9 @@ class PETRTemporalDecoderLayer(BaseModule):
                 attn_masks=None,
                 query_key_padding_mask=None,
                 key_padding_mask=None,
+                routing_weights=None, # <--- [修改1] 新增参数
                 **kwargs):
-        """Forward function for `TransformerDecoderLayer`.
-
-        **kwargs contains some specific arguments of attentions.
-
-        Args:
-            query (Tensor): The input query with shape
-                [num_queries, bs, embed_dims] if
-                self.batch_first is False, else
-                [bs, num_queries embed_dims].
-            key (Tensor): The key tensor with shape [num_keys, bs,
-                embed_dims] if self.batch_first is False, else
-                [bs, num_keys, embed_dims] .
-            value (Tensor): The value tensor with same shape as `key`.
-            query_pos (Tensor): The positional encoding for `query`.
-                Default: None.
-            key_pos (Tensor): The positional encoding for `key`.
-                Default: None.
-            attn_masks (List[Tensor] | None): 2D Tensor used in
-                calculation of corresponding attention. The length of
-                it should equal to the number of `attention` in
-                `operation_order`. Default: None.
-            query_key_padding_mask (Tensor): ByteTensor for `query`, with
-                shape [bs, num_queries]. Only used in `self_attn` layer.
-                Defaults to None.
-            key_padding_mask (Tensor): ByteTensor for `query`, with
-                shape [bs, num_keys]. Default: None.
-
-        Returns:
-            Tensor: forwarded results with shape [num_queries, bs, embed_dims].
-        """
+        """Forward function for `TransformerDecoderLayer`."""
 
         norm_index = 0
         attn_index = 0
@@ -729,16 +677,51 @@ class PETRTemporalDecoderLayer(BaseModule):
                 norm_index += 1
 
             elif layer == 'cross_attn':
-                query = self.attentions[attn_index](
-                    query,
-                    key,
-                    value,
-                    identity if self.pre_norm else None,
-                    query_pos=query_pos,
-                    key_pos=key_pos,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=key_padding_mask,
-                    **kwargs)
+                # === [修改2] MoE 逻辑开始 ===
+                if isinstance(key, list) and routing_weights is not None:
+                    # key 是 List[Tensor], routing_weights 是 [B, Nq, Num_Levels]
+                    
+                    # 调整权重形状以匹配 Query: [B, Nq, L] -> [Nq, B, L]
+                    # 注意：假设 query 是 [Nq, B, C]
+                    weights = routing_weights.permute(1, 0, 2)
+                    
+                    final_query = 0
+                    
+                    # 遍历每一层 (FPN Level)
+                    # key 和 key_pos 都是列表
+                    for lvl, (lvl_key, lvl_pos) in enumerate(zip(key, key_pos)):
+                        # 计算当前层的 Attention
+                        lvl_out = self.attentions[attn_index](
+                            query,
+                            lvl_key, # Key (当前层)
+                            lvl_key, # Value (当前层，通常 PETR 里 V=K)
+                            identity if self.pre_norm else None,
+                            query_pos=query_pos,
+                            key_pos=lvl_pos, # Pos (当前层)
+                            attn_mask=attn_masks[attn_index],
+                            key_padding_mask=key_padding_mask,
+                            **kwargs)
+                        
+                        # 获取当前层的权重并加权
+                        w = weights[..., lvl].unsqueeze(-1) # [Nq, B, 1]
+                        final_query += lvl_out * w
+                        
+                    query = final_query
+                
+                else:
+                    # 原有逻辑 (单尺度)
+                    query = self.attentions[attn_index](
+                        query,
+                        key,
+                        value,
+                        identity if self.pre_norm else None,
+                        query_pos=query_pos,
+                        key_pos=key_pos,
+                        attn_mask=attn_masks[attn_index],
+                        key_padding_mask=key_padding_mask,
+                        **kwargs)
+                # === [修改2] MoE 逻辑结束 ===
+                
                 attn_index += 1
                 identity = query
 
@@ -760,6 +743,7 @@ class PETRTemporalDecoderLayer(BaseModule):
                 attn_masks=None,
                 query_key_padding_mask=None,
                 key_padding_mask=None,
+                routing_weights=None, # <--- [修改3] 新增参数
                 **kwargs
                 ):
         """Forward function for `TransformerCoder`.
@@ -780,6 +764,7 @@ class PETRTemporalDecoderLayer(BaseModule):
                 attn_masks,
                 query_key_padding_mask,
                 key_padding_mask,
+                routing_weights, # <--- [修改4] 传入 checkpoint
                 )
         else:
             x = self._forward(
@@ -793,6 +778,7 @@ class PETRTemporalDecoderLayer(BaseModule):
             attn_masks,
             query_key_padding_mask,
             key_padding_mask,
+            routing_weights=routing_weights, # <--- [修改5] 传入 _forward
         )
         return x
 

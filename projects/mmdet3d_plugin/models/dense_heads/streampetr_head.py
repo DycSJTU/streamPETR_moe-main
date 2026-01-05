@@ -26,8 +26,10 @@ from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
 from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear
-
+from projects.mmdet3d_plugin.models.utils.moe_router import StreamMoERouter
 @HEADS.register_module()
+
+
 class StreamPETRHead(AnchorFreeHead):
     """Implements the DETR transformer head.
     See `paper: End-to-End Object Detection with Transformers
@@ -65,7 +67,7 @@ class StreamPETRHead(AnchorFreeHead):
                  stride=16,
                  num_levels = 4,
                  embed_dims=256,
-                 num_query=100,
+                 num_query=900,
                  num_reg_fcs=2,
                  memory_len=1024,
                  topk_proposals=256,
@@ -107,6 +109,7 @@ class StreamPETRHead(AnchorFreeHead):
                  init_cfg=None,
                  normedlinear=False,
                  **kwargs):
+        super(StreamPETRHead, self).__init__()
         # NOTE here use `AnchorFreeHead` instead of `TransformerHead`,
         # since it brings inconvenience when the initialization of
         # `AnchorFreeHead` is called.
@@ -202,6 +205,12 @@ class StreamPETRHead(AnchorFreeHead):
             self.cls_out_channels = num_classes + 1
 
         self.transformer = build_transformer(transformer)
+        
+        self.router = StreamMoERouter(
+            embed_dims=self.embed_dims, 
+            num_levels=4, 
+            top_k=2
+        )
 
         self.code_weights = nn.Parameter(torch.tensor(
             self.code_weights), requires_grad=False)
@@ -648,17 +657,22 @@ class StreamPETRHead(AnchorFreeHead):
         # prepare for the tgt and query_pos using mln.
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = self.temporal_alignment(query_pos, tgt, reference_points)
 
+        # === [新增] Router 计算权重 ===
+        # 利用融合了历史信息的 query_pos 来决定每个 Query 该看哪一层
+        # routing_weights: [B, Nq, Num_Levels]
+        routing_weights, routing_indices = self.router(query_pos)
+
         # transformer here is a little different from PETR
-        #outs_dec, _ = self.transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
-        # 传入刚刚准备好的列表 (mlvl_memories, mlvl_pos_embeds)
+        # 传入刚刚准备好的列表 (mlvl_memories, mlvl_pos_embeds) 以及 routing_weights
         outs_dec, _ = self.transformer(
-            mlvl_memories,    # <--- 改成 List
+            mlvl_memories,    # List[Tensor]
             tgt, 
             query_pos, 
-            mlvl_pos_embeds,  # <--- 改成 List
+            mlvl_pos_embeds,  # List[Tensor]
             attn_mask, 
             temp_memory, 
-            temp_pos
+            temp_pos,
+            routing_weights=routing_weights  # <--- [核心修改] 传入路由权重
         )
         outs_dec = torch.nan_to_num(outs_dec)
         outputs_classes = []

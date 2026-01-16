@@ -518,8 +518,6 @@ class PETRTemporalTransformer(BaseModule):
         
         return out_dec, memory
 
-
-@TRANSFORMER_LAYER.register_module()
 @TRANSFORMER_LAYER.register_module()
 class PETRTemporalDecoderLayer(BaseModule):
     """Base `TransformerLayer` for vision transformer."""
@@ -781,4 +779,3 @@ class PETRTemporalDecoderLayer(BaseModule):
             routing_weights=routing_weights, # <--- [修改5] 传入 _forward
         )
         return x
-

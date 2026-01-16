@@ -109,7 +109,6 @@ class StreamPETRHead(AnchorFreeHead):
                  init_cfg=None,
                  normedlinear=False,
                  **kwargs):
-        super(StreamPETRHead, self).__init__()
         # NOTE here use `AnchorFreeHead` instead of `TransformerHead`,
         # since it brings inconvenience when the initialization of
         # `AnchorFreeHead` is called.
@@ -386,6 +385,10 @@ class StreamPETRHead(AnchorFreeHead):
 
     def position_embeding(self, data, memory_centers, topk_indexes, img_metas):
         eps = 1e-5
+        # [Auto-Patch] Fix for Batch Size = 1
+        if memory_centers.dim() == 5:
+            B, N, H, W, C = memory_centers.shape
+            memory_centers = memory_centers.view(B * N, H, W, C)
         BN, H, W, _ = memory_centers.shape
         B = data['intrinsics'].size(0)
 

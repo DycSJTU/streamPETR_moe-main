@@ -266,6 +266,19 @@ class FocalHead(AnchorFreeHead):
                     all_depths_list,
                     img_metas,
                     gt_bboxes_ignore_list=None):
+
+        # [Auto-Patch] 动态计算 Stride 以修复 2816 vs 704 报错
+        if centerness is not None and len(img_metas) > 0:
+            # 获取单张特征图的 token 数 (h*w)
+            num_tokens = centerness.shape[1]
+            # 获取原始图像尺寸
+            img_h, img_w, _ = img_metas[0]['pad_shape'][0]
+            # 反推当前层级的真实 Stride
+            real_stride = int(((img_h * img_w) / num_tokens) ** 0.5)
+            if real_stride != self.stride:
+                # print(f'Auto-adjusting stride from {self.stride} to {real_stride} for alignment')
+                self.stride = real_stride
+
         """"Loss function for outputs from a single decoder layer of a single
         feature level.
 

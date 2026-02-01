@@ -663,8 +663,10 @@ class StreamPETRHead(AnchorFreeHead):
         # === [新增] Router 计算权重 ===
         # 利用融合了历史信息的 query_pos 来决定每个 Query 该看哪一层
         # routing_weights: [B, Nq, Num_Levels]
-        routing_weights, routing_indices = self.router(query_pos)
-
+        #routing_weights, routing_indices = self.router(query_pos)
+       
+        router_input = tgt + query_pos 
+        routing_weights, routing_indices, aux_loss = self.router(router_input)
         # transformer here is a little different from PETR
         # 传入刚刚准备好的列表 (mlvl_memories, mlvl_pos_embeds) 以及 routing_weights
         outs_dec, _ = self.transformer(
@@ -709,14 +711,15 @@ class StreamPETRHead(AnchorFreeHead):
             outs = {
                 'all_cls_scores': outputs_class,
                 'all_bbox_preds': outputs_coord,
-                'dn_mask_dict':mask_dict,
-
+                'dn_mask_dict': mask_dict,
+                'aux_loss': aux_loss  # <--- [新增] 必须返回，供 loss 函数使用
             }
         else:
             outs = {
                 'all_cls_scores': all_cls_scores,
                 'all_bbox_preds': all_bbox_preds,
-                'dn_mask_dict':None,
+                'dn_mask_dict': None,
+                'aux_loss': aux_loss  # <--- [新增] 必须返回
             }
 
         return outs
@@ -1039,6 +1042,12 @@ class StreamPETRHead(AnchorFreeHead):
         # loss from the last decoder layer
         loss_dict['loss_cls'] = losses_cls[-1]
         loss_dict['loss_bbox'] = losses_bbox[-1]
+
+        # [修改点] 在这里加入 MoE Aux Loss
+    
+        if 'aux_loss' in preds_dicts:
+            # 直接取出来放入 loss_dict，它会自动参与梯度反向传播
+            loss_dict['loss_moe'] = preds_dicts['aux_loss']
 
         # loss from other decoder layers
         num_dec_layer = 0

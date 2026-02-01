@@ -46,11 +46,12 @@ def soft_topk(logits, k, temperature=1.0):
     return soft_topk_probs, topk_indices
 
 class StreamMoERouter(nn.Module):
-    def __init__(self, embed_dims, num_levels, top_k=2):
+    def __init__(self, embed_dims, num_levels, top_k=2, loss_weight=0.01):
         super().__init__()
         self.embed_dims = embed_dims
         self.num_levels = num_levels 
         self.top_k = top_k
+        self.loss_weight = loss_weight # [新增] Loss 权重系数
         
         # Router Network: Maps query embedding to logits for each level
         self.gate = nn.Sequential(
@@ -65,7 +66,8 @@ class StreamMoERouter(nn.Module):
             query_embeds: (B, Nq, C) 
         Returns:
             routing_weights: (B, Nq, Num_Levels) - Weights for feature fusion
-            topk_indices: (B, Nq, K) - Indices of selected levels (for analysis or hard gating)
+            topk_indices: (B, Nq, K) - Indices of selected levels
+            aux_loss: Scalar Tensor - Load balancing loss
         """
         # 1. Calculate routing logits
         logits = self.gate(query_embeds) 
@@ -85,4 +87,20 @@ class StreamMoERouter(nn.Module):
             routing_weights = F.softmax(logits, dim=-1) * mask
             routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
-        return routing_weights, topk_indices
+        # 3. [新增] 计算负载均衡损失 (Switch Transformer Loss)
+        # L = alpha * N * sum(P * f)
+        aux_loss = torch.tensor(0.0, device=logits.device)
+        
+        if self.training:
+            # P_i: Router 对 Expert i 的平均预测概率 (使用无噪声的 logits 计算)
+            # F.softmax(logits) -> mean over Batch & Query
+            P = F.softmax(logits, dim=-1).mean(dim=(0, 1))
+            
+            # f_i: Expert i 被实际选中的频率 (使用 routing_weights 近似)
+            # mean over Batch & Query
+            f = routing_weights.mean(dim=(0, 1))
+            
+            # 计算 Loss: 最小化 P 和 f 的点积，迫使两者接近均匀分布
+            aux_loss = self.loss_weight * self.num_levels * torch.sum(P * f)
+
+        return routing_weights, topk_indices, aux_loss

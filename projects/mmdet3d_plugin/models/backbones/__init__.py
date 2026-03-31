@@ -7,4 +7,5 @@
 from .vovnet import VoVNet
 from .vovnetcp import VoVNetCP
 from .eva_vit import EVAViT
+from .intern_vit import InternViT
 
